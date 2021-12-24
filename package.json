@@ -1,6 +1,6 @@
 {
   "name": "crypts",
-  "version": "1.0.0",
+  "version": "0.2.0",
   "description": "Structured, dependable legos for starknet development.",
   "main": "index.js",
   "repository": "https://github.com/a5f9t4/crypts.git",
