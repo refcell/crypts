@@ -490,3 +490,23 @@ func allowance{
     let (REMAINING: Uint256) = ALLOWANCE.read(owner=owner, spender=spender)
     return (remaining=REMAINING)
 end
+
+@external
+func underlying{
+    syscall_ptr: felt*,
+    pedersen_ptr: HashBuiltin*,
+    range_check_ptr
+}() -> (underlying: felt):
+    let (underlying: felt) = UNDERLYING.read()
+    return (underlying)
+end
+
+@external
+func initialized{
+    syscall_ptr: felt*,
+    pedersen_ptr: HashBuiltin*,
+    range_check_ptr
+}() -> (initialized: felt):
+    let (initialized: felt) = INITIALIZED.read()
+    return (initialized)
+end

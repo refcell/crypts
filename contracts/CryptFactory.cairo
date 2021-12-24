@@ -10,7 +10,6 @@ from starkware.cairo.common.math import assert_not_zero
 ## @description Adapted from Rari Capital's Vaults: https://github.com/Rari-Capital/vaults
 ## @author Alucard <github.com/a5f9t4>
 
-
 #############################################
 ##                 STORAGE                 ##
 #############################################
@@ -93,4 +92,28 @@ func isCryptDeployed{
     else:
         return (1)
     end
+end
+
+#############################################
+##                 ACCESSORS               ##
+#############################################
+
+@external
+func owner{
+    syscall_ptr: felt*,
+    pedersen_ptr: HashBuiltin*,
+    range_check_ptr
+}() -> (owner: felt):
+    let (owner: felt) = OWNER.read()
+    return (owner)
+end
+
+@external
+func initialized{
+    syscall_ptr: felt*,
+    pedersen_ptr: HashBuiltin*,
+    range_check_ptr
+}() -> (initialized: felt):
+    let (initialized: felt) = INITIALIZED.read()
+    return (initialized)
 end
