@@ -3,8 +3,8 @@
 
 from starkware.cairo.common.cairo_builtins import HashBuiltin, SignatureBuiltin
 from starkware.starknet.common.syscalls import get_caller_address
-from starkware.cairo.common.math import assert_nn_le, assert_not_zero
-from starkware.cairo.common.uint256 import Uint256, uint256_le, uint256_sub, uint256_add
+from starkware.cairo.common.math import assert_le, assert_not_zero, assert_lt
+from starkware.cairo.common.uint256 import Uint256, uint256_le, uint256_sub, uint256_add, uint256_check, uint256_lt
 
 ## @title Crypt
 ## @description Flexible, minimalist, and gas-optimized yield aggregator for earning interest on any ERC20 token.
@@ -79,7 +79,7 @@ func constructor{
     SYMBOL.write(0x0) # TODO: encode string to bytes
 
     UNDERLYING.write(underlying)
-    BASE_UNIT.write(10^18)
+    BASE_UNIT.write(10**18)
 
     return()
 end
@@ -97,7 +97,7 @@ func initialize{
 end
 
 #############################################
-##               Crypt LOGIC               ##
+##                FEE LOGIC                ##
 #############################################
 
 ## Fee Configuration ##
@@ -107,14 +107,154 @@ func setFeePercent{
     pedersen_ptr: HashBuiltin*,
     range_check_ptr
 }(
-    fee: uint256
+    fee: felt
 ):
-    assert fee > 0
+    assert_lt(0, fee)
     FEE_PERCENT.write(fee)
     return ()
 end
 
-# 
+#############################################
+##              HARVEST LOGIC              ##
+#############################################
+
+@storage_var
+func HARVEST_WINDOW() -> (window: felt):
+end
+
+@storage_var
+func HARVEST_DELAY() -> (delay: felt):
+end
+
+@storage_var
+func NEXT_HARVEST_DELAY() -> (delay: felt):
+end
+
+## @notice Sets a new harvest window.
+## @param newHarvestWindow The new harvest window.
+## @dev HARVEST_DELAY must be set before calling.
+@external
+func setHarvestWindow{
+    syscall_ptr: felt*,
+    pedersen_ptr: HashBuiltin*,
+    range_check_ptr
+}(
+    window: felt
+):
+    # TODO: auth
+    let (delay) = HARVEST_DELAY.read()
+    assert_le(window, delay)
+    HARVEST_WINDOW.write(window)
+    return ()
+end
+
+## @notice Sets a new harvest delay.
+## @param newHarvestDelay The new harvest delay.
+@external
+func setHarvestDelay{
+    syscall_ptr: felt*,
+    pedersen_ptr: HashBuiltin*,
+    range_check_ptr
+}(
+    new_delay: felt
+):
+    alloc_locals
+
+    # TODO: auth
+
+    let (local delay) = HARVEST_DELAY.read()
+    assert_not_zero(new_delay)
+    assert_le(new_delay, 31536000) # 31,536,000 = 365 days = 1 year
+
+    # If the previous delay is 0, we should set immediately
+    if delay == 0:
+        HARVEST_DELAY.write(new_delay)
+    else:
+        NEXT_HARVEST_DELAY.write(new_delay)
+    end
+    return ()
+end
+
+
+#############################################
+##            FLOAT REBALANCING            ##
+#############################################
+
+## @notice The desired float percentage of holdings.
+## @dev A fixed point number where 1e18 represents 100% and 0 represents 0%.
+@storage_var
+func TARGET_FLOAT_PERCENT() -> (percent: Uint256):
+end
+
+# const MAX_UINT256 = Uint256(2**128-1, 2**128-1)
+
+## @notice Sets a new target float percentage.
+@external
+func setTargetFloatPercent{
+    syscall_ptr: felt*,
+    pedersen_ptr: HashBuiltin*,
+    range_check_ptr
+}(
+    new_float: Uint256
+):
+    alloc_locals
+
+    # TODO: auth
+
+    uint256_check(new_float)
+    let (local lt: felt) = uint256_lt(new_float, Uint256(2**128-1, 2**128-1))
+    assert lt = 1
+    TARGET_FLOAT_PERCENT.write(new_float)
+    return ()
+end
+
+#############################################
+##            STRATEGY STORAGE             ##
+#############################################
+
+## @notice The total amount of underlying tokens held in strategies at the time of the last harvest.
+## @dev Includes maxLockedProfit, must be correctly subtracted to compute available/free holdings.
+@storage_var
+func TOTAL_STRATEGY_HOLDINGS() -> (holdings: Uint256):
+end
+
+## @notice Data for a given strategy.
+## @param trusted Whether the strategy is trusted.
+## @param balance The amount of underlying tokens held in the strategy.
+struct StrategyData:
+    member trusted: felt # 0 (false) or 1 (true)
+    member balance: felt
+end
+
+## @notice Maps strategies to data the Vault holds on them.
+@storage_var
+func STRATEGY_DATA(strategy: felt) -> (data: StrategyData):
+end
+
+#############################################
+##             HARVEST STORAGE             ##
+#############################################
+
+## @notice A timestamp representing when the first harvest in the most recent harvest window occurred.
+## @dev May be equal to lastHarvest if there was/has only been one harvest in the most last/current window.
+@storage_var
+func LAST_HARVEST_WINDOW_START() -> (start: felt):
+end
+
+## @notice A timestamp representing when the most recent harvest occurred.
+@storage_var
+func LAST_HARVEST() -> (harvest: felt):
+end
+
+## @notice The amount of locked profit at the end of the last harvest.
+@storage_var
+func MAX_LOCKED_PROFIT() -> (profit: felt):
+end
+
+#############################################
+##        WITHDRAWAL QUEUE STORAGE         ##
+#############################################
+
 
 
 #############################################
