@@ -34,3 +34,12 @@ async def test_constructor(initialize):
     expected = await crypt.underlying().call()
     assert expected.result.underlying == underlying_addr
 
+
+@pytest.mark.asyncio
+async def test_set_name(initialize):
+    _, crypt, _ = initialize
+
+    # Validate `underlying` set properly
+    expected = await crypt.underlying().call()
+    assert expected.result.underlying == underlying_addr
+

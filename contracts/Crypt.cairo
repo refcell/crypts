@@ -2,9 +2,11 @@
 %builtins pedersen range_check ecdsa
 
 from starkware.cairo.common.cairo_builtins import HashBuiltin, SignatureBuiltin
-from starkware.starknet.common.syscalls import get_caller_address
+from starkware.starknet.common.syscalls import get_caller_address, get_contract_address
 from starkware.cairo.common.math import assert_le, assert_not_zero, assert_lt
 from starkware.cairo.common.uint256 import Uint256, uint256_le, uint256_sub, uint256_add, uint256_check, uint256_lt
+
+from contracts.interfaces.IERC20 import IERC20
 
 ## @title Crypt
 ## @description Flexible, minimalist, and gas-optimized yield aggregator for earning interest on any ERC20 token.
@@ -255,17 +257,258 @@ end
 ##        WITHDRAWAL QUEUE STORAGE         ##
 #############################################
 
+## @notice An ordered array of strategies representing the withdrawal queue.
+## @dev The queue is processed in descending order.
+## @dev Returns a tupled-array of (array_len, Strategy[])
+@storage_var
+func WITHDRAWAL_QUEUE() -> (queue: (felt, Strategy*)):
+end
+
+## @notice Gets the full withdrawal queue.
+## @return An ordered array of strategies representing the withdrawal queue.
+func getWithdrawalQueue{
+    syscall_ptr: felt*,
+    pedersen_ptr: HashBuiltin*,
+    range_check_ptr
+}() -> (
+    queue_len: felt,
+    queue: Strategy*
+):
+    let (queue_len, queue) = WITHDRAWAL_QUEUE.read()
+    return (queue_len, queue)
+end
+
+#############################################
+##        DEPOSIT/WITHDRAWAL LOGIC         ##
+#############################################
+
+## @notice Deposit a specific amount of underlying tokens.
+## @param underlyingAmount The amount of the underlying token to deposit.
+func deposit{
+    syscall_ptr: felt*,
+    pedersen_ptr: HashBuiltin*,
+    range_check_ptr
+}(
+    underlyingAmount: felt
+):
+    alloc_locals
+    let (local underlying) = UNDERLYING.read()
+    let (local caller) = get_caller_address()
+    let (local contract) = get_contract_address()
+
+    # Prevent zero deposits for future event handling
+    assert_non_zero(underlyingAmount)
+
+    _mint(caller, underlyingAmount.fdiv(exchangeRate(), BASE_UNIT))
+
+    # Transfer in underlying tokens from the user.
+    # This will revert if the user does not have the amount specified.
+    IERC20.transferFrom(
+        contract_address=underlying,
+        sender=caller,
+        recipient=contract,
+        amount=underlyingAmount
+    )
+    return ()
+end
+
+## @notice Withdraw a specific amount of underlying tokens.
+## @param underlyingAmount The amount of underlying tokens to withdraw.
+func withdraw{
+    syscall_ptr: felt*,
+    pedersen_ptr: HashBuiltin*,
+    range_check_ptr
+}(
+    underlyingAmount: felt
+):
+    alloc_locals
+    let (local underlying) = UNDERLYING.read()
+    let (local caller) = get_caller_address()
+    let (local contract) = get_contract_address()
+
+    # Prevent zero deposits for future event handling
+    assert_non_zero(underlyingAmount)
+
+    # Determine the equivalent amount of rvTokens and burn them.
+    _burn(caller, underlyingAmount.fdiv(exchangeRate(), BASE_UNIT))
+
+    # Withdraw from strategies if needed and transfer.
+    transferUnderlyingTo(caller, underlyingAmount)
+
+    return ()
+end
+
+## @notice Redeem a specific amount of crTokens for underlying tokens.
+## @param crTokenAmount The amount of crTokens to redeem for underlying tokens.
+func redeem{
+    syscall_ptr: felt*,
+    pedersen_ptr: HashBuiltin*,
+    range_check_ptr
+}(
+    crTokenAmount: Uint256
+):
+    alloc_locals
+    let (local underlying) = UNDERLYING.read()
+    let (local caller) = get_caller_address()
+    let (local contract) = get_contract_address()
+
+    # Prevent zero deposits for future event handling
+    uint256_lt(0, crTokenAmount)
+
+    # Determine the equivalent amount of underlying tokens.
+    let (er: Uint256) = exchangeRate()
+    let (bu: Uint256) = BASE_UNIT.read()
+    let (scaled: Uint256) = uint256_mul(crTokenAmount, er)
+    let (underlyingAmount: Unit256) = uint256_div(scaled, bu)
+
+    # Burn the provided amount of crTokens.
+    _burn(caller, crTokenAmount)
+
+    # Withdraw from strategies if needed and transfer.
+    transferUnderlyingTo(caller, underlyingAmount)
+    return ()
+end
+
+## @dev Transfers a specific amount of underlying tokens held in strategies and/or float to a recipient.
+## @dev Only withdraws from strategies if needed and maintains the target float percentage if possible.
+## @param recipient The user to transfer the underlying tokens to.
+## @param underlyingAmount The amount of underlying tokens to transfer.
+function transferUnderlyingTo(address recipient, uint256 underlyingAmount) internal {
+    // Get the Vault's floating balance.
+    uint256 float = totalFloat();
+
+    // If the amount is greater than the float, withdraw from strategies.
+    if (underlyingAmount > float) {
+        // Compute the amount needed to reach our target float percentage.
+        uint256 floatMissingForTarget = (totalHoldings() - underlyingAmount).fmul(targetFloatPercent, 1e18);
+
+        // Compute the bare minimum amount we need for this withdrawal.
+        uint256 floatMissingForWithdrawal = underlyingAmount - float;
+
+        // Pull enough to cover the withdrawal and reach our target float percentage.
+        pullFromWithdrawalQueue(floatMissingForWithdrawal + floatMissingForTarget);
+    }
+
+    // Transfer the provided amount of underlying tokens.
+    UNDERLYING.safeTransfer(recipient, underlyingAmount);
+}
+
+#############################################
+##         VAULT ACCOUNTING LOGIC          ##
+#############################################
+
+/// @notice Returns a user's Vault balance in underlying tokens.
+/// @param user The user to get the underlying balance of.
+/// @return The user's Vault balance in underlying tokens.
+function balanceOfUnderlying(address user) external view returns (uint256) {
+    return balanceOf[user].fmul(exchangeRate(), BASE_UNIT);
+}
+
+/// @notice Returns the amount of underlying tokens an rvToken can be redeemed for.
+/// @return The amount of underlying tokens an rvToken can be redeemed for.
+function exchangeRate() public view returns (uint256) {
+    // Get the total supply of rvTokens.
+    uint256 rvTokenSupply = totalSupply;
+
+    // If there are no rvTokens in circulation, return an exchange rate of 1:1.
+    if (rvTokenSupply == 0) return BASE_UNIT;
+
+    // Calculate the exchange rate by dividing the total holdings by the rvToken supply.
+    return totalHoldings().fdiv(rvTokenSupply, BASE_UNIT);
+}
+
+/// @notice Calculates the total amount of underlying tokens the Vault holds.
+/// @return totalUnderlyingHeld The total amount of underlying tokens the Vault holds.
+function totalHoldings() public view returns (uint256 totalUnderlyingHeld) {
+    unchecked {
+        // Cannot underflow as locked profit can't exceed total strategy holdings.
+        totalUnderlyingHeld = totalStrategyHoldings - lockedProfit();
+    }
+
+    // Include our floating balance in the total.
+    totalUnderlyingHeld += totalFloat();
+}
+
+/// @notice Calculates the current amount of locked profit.
+/// @return The current amount of locked profit.
+function lockedProfit() public view returns (uint256) {
+    // Get the last harvest and harvest delay.
+    uint256 previousHarvest = lastHarvest;
+    uint256 harvestInterval = harvestDelay;
+
+    unchecked {
+        // If the harvest delay has passed, there is no locked profit.
+        // Cannot overflow on human timescales since harvestInterval is capped.
+        if (block.timestamp >= previousHarvest + harvestInterval) return 0;
+
+        // Get the maximum amount we could return.
+        uint256 maximumLockedProfit = maxLockedProfit;
+
+        // Compute how much profit remains locked based on the last harvest and harvest delay.
+        // It's impossible for the previous harvest to be in the future, so this will never underflow.
+        return maximumLockedProfit - (maximumLockedProfit * (block.timestamp - previousHarvest)) / harvestInterval;
+    }
+}
+
+/// @notice Returns the amount of underlying tokens that idly sit in the Vault.
+/// @return The amount of underlying tokens that sit idly in the Vault.
+function totalFloat() public view returns (uint256) {
+    return UNDERLYING.balanceOf(address(this));
+}
+
+#############################################
+##              HARVEST LOGIC              ##
+#############################################
+
+
+#############################################
+##      STRATEGY TRUST/DISTRUST LOGIC      ##
+#############################################
+
+
+#############################################
+##         WITHDRAWAL QUEUE LOGIC          ##
+#############################################
+
+
+#############################################
+##          SEIZE STRATEGY LOGIC           ##
+#############################################
 
 
 #############################################
 ##                                         ##
 ##               ERC20 LOGIC               ##
 ##                                         ##
-## Since there is no canonical inheritance ##
-## pattern, we must implement ERC20 logic. ##
+##     Absent a canonical inheritance      ##
+##   pattern, we implement ERC20 logic.    ##
 ##                                         ##
 #############################################
 
+func _mint{
+    syscall_ptr: felt*,
+    pedersen_ptr: HashBuiltin*,
+    range_check_ptr
+}(
+    to: felt,
+    amount: Uint256
+):
+    alloc_locals
+    assert_not_zero(recipient)
+    uint256_check(amount)
+
+    let (balance: Uint256) = BALANCE_OF.read(account=recipient)
+
+    let (new_balance, _: Uint256) = uint256_add(balance, amount)
+    BALANCE_OF.write(recipient, new_balance)
+
+    let (local supply: Uint256) = TOTAL_SUPPLY.read()
+    let (local new_supply: Uint256, is_overflow) = uint256_add(supply, amount)
+    assert (is_overflow) = 0
+
+    TOTAL_SUPPLY.write(new_supply)
+    return ()
+end
 
 @external
 func approve{
