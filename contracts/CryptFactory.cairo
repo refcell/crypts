@@ -15,6 +15,12 @@ from starkware.cairo.common.math import assert_not_zero
 ##                 STORAGE                 ##
 #############################################
 
+## @dev The contract owner
+@storage_var
+func OWNER() -> (owner : felt):
+end
+
+## @dev If the contract's initialized
 @storage_var
 func INITIALIZED() -> (res: felt):
 end
@@ -29,14 +35,11 @@ func constructor{
     pedersen_ptr: HashBuiltin*,
     range_check_ptr
 }(
-    owner: felt
+    owner: felt,
+    initialized: felt # 0 (false) or 1 (true)
 ):
-    NAME.write(0x0) # TODO: encode string to bytes
-    SYMBOL.write(0x0) # TODO: encode string to bytes
-
-    UNDERLYING.write(underlying)
-    BASE_UNIT.write(10**18)
-
+    OWNER.write(owner)
+    INITIALIZED.write(initialized)
     return()
 end
 
